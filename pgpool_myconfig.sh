@@ -27,8 +27,10 @@ main(){
 	echo "Creating nodes ... "
 	for (( c=0; c<${NODE_COUNT}; c++ ))
 	do  
-	   create_node $c `expr $START_PORT + $c`
-	   update_data_dirs $c `expr $START_PORT + $c`
+		port=`expr $START_PORT + $c`
+	   create_node $c $port
+	   update_port_and_socket_dir $c $port
+	   update_data_dirs $c $port
 	done
 	
 	cat data*.log
@@ -52,15 +54,31 @@ update_data_dirs(){
 
 	echo "Updating data dirs ... "
 	$PG_BIN/pg_ctl -D $node_data_dir -l $node_data_dir.log start
-	queries=("alter system set port = $node_port")
 	
-	for query in queries
+	cmds=("CREATE ROLE replication WITH REPLICATION PASSWORD 'replication' LOGIN;" 
+			"ALTER USER $DB_USER WITH PASSWORD '$DB_USER';")
+		
+	for query in "${cmds[@]}"
 	do
-		psql -U $DB_USER -c "$query"
+		echo "Sending command: ${query}"
+		psql -h localhost -p $node_port -U $DB_USER -c "${query}"
 	done
 	
 	$PG_BIN/pg_ctl -D $node_data_dir stop
 }
 
+update_port_and_socket_dir(){
+	node_data_dir="data${1}"
+	node_port=$2
+	
+	sed -i "s/^\(listen_addresses .*\)/# Commented out by Name YYYY-MM-DD \1/" $node_data_dir/postgresql.conf
+	sed -i "s/^\(port .*\)/# Commented out by Name YYYY-MM-DD \1/" $node_data_dir/postgresql.conf
+	sed -i "s/^\(unix_socket_directories .*\)/# Commented out by Name YYYY-MM-DD \1/" $node_data_dir/postgresql.conf
+	
+	
+	echo "listen_addresses = '*'" >> $node_data_dir/postgresql.conf
+	echo "port = $node_port" >> $node_data_dir/postgresql.conf
+	echo "unix_socket_directories = '`pwd`/$node_data_dir'" >> $node_data_dir/postgresql.conf
+}
 
 main "$@"
