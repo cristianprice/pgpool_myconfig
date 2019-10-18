@@ -1,19 +1,9 @@
 #!/bin/bash
 
-# Get the pg_config of the system
-PG_CONFIG=${PG_CONFIG:-`which pg_config`}
-if [ -z "$PG_CONFIG" ]
-then
-	return -1
-fi
+#Include common stuff
+CURRENT_DIR="$(dirname "$0")"
+source $CURRENT_DIR/common.sh
 
-PG_BIN=${PG_BIN:-`$PG_CONFIG --bindir`}
-
-for data_dir in *; do
-    if [ -d "$data_dir" ]; then
-	echo "Starting $data_dir ..."
-		$PG_BIN/pg_ctl -D $data_dir -l $data_dir.log stop
-    fi
-done
-
+$PG_BIN/pg_ctl -D $STANDBY_DATA_DIR -l ${STANDBY_DATA_DIR}.log stop
+$PG_BIN/pg_ctl -D $PRIMARY_DATA_DIR -l ${PRIMARY_DATA_DIR}.log stop
 

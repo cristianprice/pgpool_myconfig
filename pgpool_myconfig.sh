@@ -1,123 +1,86 @@
 #!/bin/bash
 
-# Get the pg_config of the system
-PG_CONFIG=${PG_CONFIG:-`which pg_config`}
-if [ -z "$PG_CONFIG" ]
-then
-	return -1
-fi
-
-PG_BIN=${PG_BIN:-`$PG_CONFIG --bindir`}
-PG_POOL=${PG_POOL:-`which pgpool`}
-DB_USER=${DB_USER:-"postgres"}
-NODE_COUNT=${NODE_COUNT:-2}
-START_PORT=${START_PORT:-5432}
-SLOT_NAME=${SLOT_NAME:-"ph_slot_slave"}
-
-echo
-echo "---------------------------------------------------"
-echo "DB_USER: $DB_USER"
-echo "PG_POOL: $PG_POOL"
-echo "PG_BIN: $PG_BIN"
-echo "NODE_COUNT: ${NODE_COUNT}"
-echo "---------------------------------------------------"
-echo
+#Include common stuff
+CURRENT_DIR="$(dirname "$0")"
+source $CURRENT_DIR/common.sh
 
 main(){
 
-	echo "Creating nodes ... "
-	for (( c=0; c<${NODE_COUNT}; c++ ))
-	do  
-	   port=`expr $START_PORT + $c`
-	   create_node $c $port
-	   update_port_and_socket_dir $c $port
-	   update_data_dirs $c $port
-	done
+	echo -e "\e[32mCreating nodes ... \e[39m"
+	create_primary_node
+	create_standby_node
 	
-	cat data*.log
+	cat ${PRIMARY_DATA_DIR}.log
+	#cat ${STANDBY_DATA_DIR}.log
 }
 
 
-create_node(){
+create_primary_node(){
 
-	node_data_dir="data${1}"
-	node_port=$2
-
-	echo "Creating node data : ${node_data_dir} port: `expr $node_port + 1`"
-	$PG_BIN/initdb -U $DB_USER -D ${node_data_dir}
-	echo "Changing permissions ..."
-	chmod -R 700 $node_data_dir
-}
-
-update_data_dirs(){
-	node_data_dir="data${1}"
-	node_port=$2
-
-	echo "Updating data dirs ... "
-	$PG_BIN/pg_ctl -D $node_data_dir -l $node_data_dir.log start
+	echo "Creating primary data node ..."
 	
-	cmds=("CREATE ROLE replication WITH REPLICATION PASSWORD 'replication' LOGIN;" 
-			"ALTER USER $DB_USER WITH PASSWORD '$DB_USER';")
-		
-	for query in "${cmds[@]}"
-	do
-		echo "Sending command: ${query}"
-		psql -h localhost -p $node_port -U $DB_USER -c "${query}"
-	done
+	create_node_data_dir $PRIMARY_DATA_DIR
+	update_port_and_socket_primary
 	
-	create_primary_replication_slot_and_settings $1 $node_port
-	create_secondary_settings $1 $node_port
-	$PG_BIN/pg_ctl -D $node_data_dir stop
-}
-
-create_primary_replication_slot_and_settings(){
-	node_data_dir="data${1}"
-	node_port=$2
-	cmds=("SELECT * FROM pg_create_physical_replication_slot('${SLOT_NAME}');" 
+	echo -e "\e[32mStarting server on port: \e[31m$PRIMARY_PORT\e[39m"
+	$PG_BIN/pg_ctl -D $PRIMARY_DATA_DIR -l ${PRIMARY_DATA_DIR}.log start
+	
+	#Adding settings
+	cmds=("CREATE ROLE ${REPL_USER} WITH REPLICATION PASSWORD '${REPL_USER}' LOGIN;" 
+			"ALTER USER $DB_USER WITH PASSWORD '$DB_USER';"
+			"SELECT * FROM pg_create_physical_replication_slot('${SLOT_NAME}');" 
 			"ALTER system SET wal_level = hot_standby;"
 			"ALTER system SET max_replication_slots = 3;"
 			"ALTER system SET max_wal_senders = 3;")
+	
+	for query in "${cmds[@]}"
+	do
+		echo -e "\e[31mSending command: \e[32m${query}\e[39m"
+		psql -h localhost -p $PRIMARY_PORT -U $DB_USER -c "${query}"
+	done
+	
+	echo -e "\e[32mStopping server on port: \e[31m$PRIMARY_PORT\e[39m"
+	$PG_BIN/pg_ctl -D $PRIMARY_DATA_DIR stop
+}
+
+create_standby_node(){
 		
-	if [ $1 -eq 0 ]; then
-		for query in "${cmds[@]}"
-		do
-			psql -h localhost -p $node_port -U $DB_USER -c "${query}"
-		done
-	fi
+	$PG_BIN/pg_ctl -D $PRIMARY_DATA_DIR -l ${PRIMARY_DATA_DIR}.log start
+	$PG_BIN/pg_basebackup -v -D $STANDBY_DATA_DIR -R -P -h localhost -p 5433 -U ${REPL_USER}
+	
+	$PG_BIN/pg_ctl -D $PRIMARY_DATA_DIR stop
+	
+	sed -i "s/^\(listen_addresses .*\)/# Commented out by Name YYYY-MM-DD \1/" $STANDBY_DATA_DIR/postgresql.conf
+	sed -i "s/^\(port .*\)/# Commented out by Name YYYY-MM-DD \1/" $STANDBY_DATA_DIR/postgresql.conf
+	sed -i "s/^\(unix_socket_directories .*\)/# Commented out by Name YYYY-MM-DD \1/" $STANDBY_DATA_DIR/postgresql.conf
+	
+	echo -e "\e[31mlisten_addresses = '*'\e[39m"
+	echo "listen_addresses = '*'" >> $STANDBY_DATA_DIR/postgresql.conf
+	echo "port = $SECONDARY_PORT" >> $STANDBY_DATA_DIR/postgresql.conf
+	echo "unix_socket_directories = '`pwd`/$STANDBY_DATA_DIR'" >> $STANDBY_DATA_DIR/postgresql.conf
+	echo "hot_standby = on" >> $PRIMARY_DATA_DIR/postgresql.conf
+	echo "hot_standby_feedback = on" >> $PRIMARY_DATA_DIR/postgresql.conf
 }
 
-create_secondary_settings(){
-	node_data_dir="data${1}"
-	node_port=$2
-	cmds=("ALTER system SET hot_standby = on;"
-			"ALTER system SET hot_standby_feedback = on;")
+create_node_data_dir(){
+
+	node_data_dir=$1
+	$PG_BIN/initdb -U $DB_USER -D ${node_data_dir}
+	echo -e "Changing permissions ..."
+	chmod -R 700 $node_data_dir
+}
+
+update_port_and_socket_primary(){
 		
-	if [ $1 -ne 0 ]; then
-		for query in "${cmds[@]}"
-		do
-			psql -h localhost -p $node_port -U $DB_USER -c "${query}"
-		done
-	fi
+	sed -i "s/^\(listen_addresses .*\)/# Commented out by Name YYYY-MM-DD \1/" $PRIMARY_DATA_DIR/postgresql.conf
+	sed -i "s/^\(port .*\)/# Commented out by Name YYYY-MM-DD \1/" $PRIMARY_DATA_DIR/postgresql.conf
+	sed -i "s/^\(unix_socket_directories .*\)/# Commented out by Name YYYY-MM-DD \1/" $PRIMARY_DATA_DIR/postgresql.conf
 	
-	echo "standby_mode = 'on'" >> ${node_data_dir}/recovery.conf
-	echo "primary_slot_name = '${SLOT_NAME}'" >> ${node_data_dir}/recovery.conf
-	echo "primary_conninfo = 'host=localhost port=`expr $START_PORT + 1` user=replication password=replication'" >> ${node_data_dir}/recovery.conf
-	echo "trigger_file = '`pwd`/data0/im_the_master'" >> ${node_data_dir}/recovery.conf
-
+	
+	echo "listen_addresses = '*'" >> $PRIMARY_DATA_DIR/postgresql.conf
+	echo "port = $PRIMARY_PORT" >> $PRIMARY_DATA_DIR/postgresql.conf
+	echo "unix_socket_directories = '`pwd`/$PRIMARY_DATA_DIR'" >> $PRIMARY_DATA_DIR/postgresql.conf
 }
 
-update_port_and_socket_dir(){
-	node_data_dir="data${1}"
-	node_port=$2
-	
-	sed -i "s/^\(listen_addresses .*\)/# Commented out by Name YYYY-MM-DD \1/" $node_data_dir/postgresql.conf
-	sed -i "s/^\(port .*\)/# Commented out by Name YYYY-MM-DD \1/" $node_data_dir/postgresql.conf
-	sed -i "s/^\(unix_socket_directories .*\)/# Commented out by Name YYYY-MM-DD \1/" $node_data_dir/postgresql.conf
-	
-	
-	echo "listen_addresses = '*'" >> $node_data_dir/postgresql.conf
-	echo "port = $node_port" >> $node_data_dir/postgresql.conf
-	echo "unix_socket_directories = '`pwd`/$node_data_dir'" >> $node_data_dir/postgresql.conf
-}
 
 main "$@"
