@@ -58,6 +58,8 @@ cat <<- EOF >> $STANDBY_DATA_DIR/postgresql.conf
 	port = $SECONDARY_PORT
 EOF
 
+echo "primary_slot_name = '${SLOT_NAME}'" >> $STANDBY_DATA_DIR/recovery.conf
+
 }
 
 create_node_data_dir(){
