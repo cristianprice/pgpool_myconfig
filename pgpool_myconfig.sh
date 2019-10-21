@@ -20,18 +20,15 @@ create_primary_node(){
 	echo "Creating primary data node ..."
 	
 	create_node_data_dir $PRIMARY_DATA_DIR
-	update_port_and_socket_primary
+	update_settings_primary
 	
 	echo -e "\e[32mStarting server on port: \e[31m$PRIMARY_PORT\e[39m"
-	$PG_BIN/pg_ctl -D $PRIMARY_DATA_DIR -l ${PRIMARY_DATA_DIR}.log start
+	$PG_BIN/pg_ctl -w -D $PRIMARY_DATA_DIR -l ${PRIMARY_DATA_DIR}.log start
 	
 	#Adding settings
-	cmds=("CREATE ROLE ${REPL_USER} WITH REPLICATION PASSWORD '${REPL_USER}' LOGIN;" 
-			"ALTER USER $DB_USER WITH PASSWORD '$DB_USER';"
+	cmds=("ALTER USER $DB_USER WITH PASSWORD '$DB_USER';"
 			"SELECT * FROM pg_create_physical_replication_slot('${SLOT_NAME}');" 
-			"ALTER system SET wal_level = hot_standby;"
-			"ALTER system SET max_replication_slots = 3;"
-			"ALTER system SET max_wal_senders = 3;")
+		 )
 	
 	for query in "${cmds[@]}"
 	do
@@ -40,26 +37,27 @@ create_primary_node(){
 	done
 	
 	echo -e "\e[32mStopping server on port: \e[31m$PRIMARY_PORT\e[39m"
-	$PG_BIN/pg_ctl -D $PRIMARY_DATA_DIR stop
+	$PG_BIN/pg_ctl -w -D $PRIMARY_DATA_DIR stop
 }
 
 create_standby_node(){
 		
-	$PG_BIN/pg_ctl -D $PRIMARY_DATA_DIR -l ${PRIMARY_DATA_DIR}.log start
-	$PG_BIN/pg_basebackup -v -D $STANDBY_DATA_DIR -R -P -h localhost -p 5433 -U ${REPL_USER}
+	$PG_BIN/pg_ctl -w -D $PRIMARY_DATA_DIR -l ${PRIMARY_DATA_DIR}.log start
+	echo -e "\e[32m$PG_BIN/pg_basebackup -v -D $STANDBY_DATA_DIR -R -P -h localhost -p $PRIMARY_PORT -U $DB_USER\e[39m"
+	$PG_BIN/pg_basebackup -v -D $STANDBY_DATA_DIR -R -P -h localhost -p $PRIMARY_PORT -U $DB_USER
 	
-	$PG_BIN/pg_ctl -D $PRIMARY_DATA_DIR stop
+	$PG_BIN/pg_ctl -w -D $PRIMARY_DATA_DIR stop
 	
 	sed -i "s/^\(listen_addresses .*\)/# Commented out by Name YYYY-MM-DD \1/" $STANDBY_DATA_DIR/postgresql.conf
 	sed -i "s/^\(port .*\)/# Commented out by Name YYYY-MM-DD \1/" $STANDBY_DATA_DIR/postgresql.conf
 	sed -i "s/^\(unix_socket_directories .*\)/# Commented out by Name YYYY-MM-DD \1/" $STANDBY_DATA_DIR/postgresql.conf
 	
-	echo -e "\e[31mlisten_addresses = '*'\e[39m"
-	echo "listen_addresses = '*'" >> $STANDBY_DATA_DIR/postgresql.conf
-	echo "port = $SECONDARY_PORT" >> $STANDBY_DATA_DIR/postgresql.conf
-	echo "unix_socket_directories = '`pwd`/$STANDBY_DATA_DIR'" >> $STANDBY_DATA_DIR/postgresql.conf
-	echo "hot_standby = on" >> $PRIMARY_DATA_DIR/postgresql.conf
-	echo "hot_standby_feedback = on" >> $PRIMARY_DATA_DIR/postgresql.conf
+cat <<- EOF >> $STANDBY_DATA_DIR/postgresql.conf
+	listen_addresses = '*'
+	unix_socket_directories = '`pwd`/$STANDBY_DATA_DIR'
+	port = $SECONDARY_PORT
+EOF
+
 }
 
 create_node_data_dir(){
@@ -70,16 +68,28 @@ create_node_data_dir(){
 	chmod -R 700 $node_data_dir
 }
 
-update_port_and_socket_primary(){
-		
-	sed -i "s/^\(listen_addresses .*\)/# Commented out by Name YYYY-MM-DD \1/" $PRIMARY_DATA_DIR/postgresql.conf
-	sed -i "s/^\(port .*\)/# Commented out by Name YYYY-MM-DD \1/" $PRIMARY_DATA_DIR/postgresql.conf
-	sed -i "s/^\(unix_socket_directories .*\)/# Commented out by Name YYYY-MM-DD \1/" $PRIMARY_DATA_DIR/postgresql.conf
+update_settings_primary(){
+
+cat <<- EOF >> $PRIMARY_DATA_DIR/postgresql.conf
+	listen_addresses = '*'
+	unix_socket_directories = '`pwd`/$PRIMARY_DATA_DIR'
+	port = $PRIMARY_PORT
+    wal_level = hot_standby
+    full_page_writes = on
+    wal_log_hints = on
+    max_wal_senders = 6
+    max_replication_slots = 6
 	
-	
-	echo "listen_addresses = '*'" >> $PRIMARY_DATA_DIR/postgresql.conf
-	echo "port = $PRIMARY_PORT" >> $PRIMARY_DATA_DIR/postgresql.conf
-	echo "unix_socket_directories = '`pwd`/$PRIMARY_DATA_DIR'" >> $PRIMARY_DATA_DIR/postgresql.conf
+    hot_standby = on
+    hot_standby_feedback = on
+EOF
+
+cat <<- EOF >> $PRIMARY_DATA_DIR/pg_hba.conf
+    host all all 127.0.0.1/32 trust
+	host replication $DB_USER 127.0.0.1/32 trust
+	host replication all 127.0.0.1/32 trust
+EOF
+
 }
 
 
